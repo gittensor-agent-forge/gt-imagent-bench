@@ -9,14 +9,9 @@ description = "Official benchmark runner and report generator for imagent agents
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
-dependencies = [
-  "Pillow==11.3.0",
-  "pandas==2.3.3",
-  "openpyxl==3.1.5",
-  "tqdm==4.67.3",
-  "huggingface_hub==1.15.0",
-  "python-dotenv==1.2.2",
-]
+# The runner is deliberately stdlib-only so a challenge run has no third-party
+# supply chain between the candidate agent and the recorded score.
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -39,4 +34,3 @@ imagent_bench = ["suites/**/*.jsonl", "suites/**/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-asyncio_default_fixture_loop_scope = "function"

@@ -54,9 +54,7 @@
       }
     }
   },
-  "execution": {
-    "install": false
-  },
+  "execution": {},
   "policy": {
     "minimum_score": 75.0,
     "max_failed_cases": 0,

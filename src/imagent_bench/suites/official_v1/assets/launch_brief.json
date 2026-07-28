@@ -1,9 +1,0 @@
-{
-  "title": "Launch Readiness Board",
-  "layout": "three_panel",
-  "sections": ["Scope", "Risks", "Owners"],
-  "required_text": ["Launch Readiness Board", "Scope", "Risks", "Owners"],
-  "visual_constraints": {
-    "density": "compact"
-  }
-}

@@ -43,16 +43,6 @@ def prepare_repository(repository: str | Path, checkout_dir: Path | None = None,
     return destination.resolve()
 
 
-def maybe_install_repository(repository: Path, enabled: bool) -> None:
-    if not enabled:
-        return
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-e", str(repository)],
-        cwd=repository,
-        check=True,
-    )
-
-
 def load_agent(repository: Path) -> tuple[Any, dict[str, Any]]:
     manifest = _load_manifest(repository)
     entrypoint = str(manifest.get("entrypoint", "")).strip()
@@ -65,7 +55,11 @@ def load_agent(repository: Path) -> tuple[Any, dict[str, Any]]:
         raise AgentLoadError("agent manifest entrypoint must include module and attribute")
 
     _clear_candidate_modules(module_name)
-    sys.path.insert(0, str(repository))
+    repository_path = str(repository)
+    # Avoid unbounded sys.path growth across repeated loads; keep the entry so
+    # candidate agents can still perform lazy imports later.
+    if repository_path not in sys.path:
+        sys.path.insert(0, repository_path)
     try:
         module = importlib.import_module(module_name)
         agent_cls = getattr(module, attribute)

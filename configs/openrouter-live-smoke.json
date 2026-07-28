@@ -29,13 +29,11 @@
     },
     "evaluation": {
       "image_judge": {
-        "provider": "mock_text"
+        "provider": "none"
       }
     }
   },
-  "execution": {
-    "install": false
-  },
+  "execution": {},
   "policy": {
     "minimum_score": 100.0,
     "max_failed_cases": 0,

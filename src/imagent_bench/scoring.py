@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import base64
-import html
 import json
 import mimetypes
 import os
 import re
-import xml.etree.ElementTree as ET
+import time
 from pathlib import Path
 from typing import Any
 import urllib.error
@@ -27,51 +26,33 @@ class JudgeError(RuntimeError):
     """Raised when an image judge cannot produce a usable score."""
 
 
+# Score awarded in smoke mode, where the only assertion is that the agent
+# produced a usable image at all.
+SMOKE_SCORE = 100.0
+
+
 def evaluate_case(
     image_path: Path,
     *,
     prompt: str,
-    checks: list[dict[str, Any]],
     judge_config: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], float, dict[str, Any]]:
+) -> tuple[float, dict[str, Any]]:
+    """Score one generated image.
+
+    A vision judge is the only real scoring path. `none` is smoke mode: run the
+    agent end to end against a live provider without paying for a judge call.
+    """
     judge_config = judge_config or {}
-    provider = str(judge_config.get("provider", "mock_text")).strip().lower()
+    provider = str(judge_config.get("provider", "none")).strip().lower()
+
     if provider in {"openrouter", "openrouter_vision"}:
         judge_result = evaluate_openrouter_vision(image_path, prompt=prompt, config=judge_config)
-        return [], float(judge_result["overall_score"]), judge_result
+        return float(judge_result["overall_score"]), judge_result
 
-    check_results = evaluate_checks(image_path, checks)
-    return check_results, score_from_checks(check_results), {}
+    if provider in {"none", ""}:
+        return SMOKE_SCORE, {}
 
-
-def evaluate_checks(image_path: Path, checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    visible_text = _read_visible_text(image_path)
-    results: list[dict[str, Any]] = []
-    for check in checks:
-        check_type = str(check.get("type", ""))
-        value = str(check.get("value", ""))
-        if check_type == "image_contains":
-            passed = _contains_visible_text(visible_text, value)
-            reason = "exact visible text matched" if passed else "exact visible text missing"
-        else:
-            passed = False
-            reason = f"unsupported check type: {check_type}"
-        results.append(
-            {
-                "type": check_type,
-                "value": value,
-                "passed": passed,
-                "reason": reason,
-            }
-        )
-    return results
-
-
-def score_from_checks(checks: list[dict[str, Any]]) -> float:
-    if not checks:
-        return 100.0
-    passed = sum(1 for check in checks if check.get("passed") is True)
-    return round((passed / len(checks)) * 100.0, 6)
+    raise JudgeError(f"unknown image judge provider: {provider}")
 
 
 def evaluate_openrouter_vision(image_path: Path, *, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -112,14 +93,32 @@ def evaluate_openrouter_vision(image_path: Path, *, prompt: str, config: dict[st
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=int(config.get("timeout_seconds", 180))) as response:
-            response_payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise JudgeError(f"OpenRouter judge HTTP {exc.code}: {body}") from exc
-    except urllib.error.URLError as exc:
-        raise JudgeError(f"OpenRouter judge request failed: {exc}") from exc
+    timeout = int(config.get("timeout_seconds", 180))
+    max_retries = int(config.get("max_retries", 3))
+    delay_seconds = float(config.get("retry_backoff_seconds", 1.0))
+    response_payload: dict[str, Any] | None = None
+    # Retry transient failures (429/5xx and network errors) with exponential
+    # backoff so a single blip does not abort the whole benchmark.
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code in {429, 500, 502, 503, 504} and attempt < max_retries:
+                time.sleep(delay_seconds)
+                delay_seconds *= 2
+                continue
+            body = exc.read().decode("utf-8", errors="replace")
+            raise JudgeError(f"OpenRouter judge HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            if attempt < max_retries:
+                time.sleep(delay_seconds)
+                delay_seconds *= 2
+                continue
+            raise JudgeError(f"OpenRouter judge request failed: {exc}") from exc
+    if response_payload is None:  # pragma: no cover - defensive, loop always sets or raises
+        raise JudgeError("OpenRouter judge request failed after retries")
 
     content = _openrouter_message_content(response_payload)
     parsed = _parse_judge_json(content)
@@ -143,16 +142,6 @@ def evaluate_openrouter_vision(image_path: Path, *, prompt: str, config: dict[st
         },
         "cost_usd": float(usage.get("cost", 0.0) or 0.0),
     }
-
-
-def _read_visible_text(image_path: Path) -> str:
-    if not image_path.exists():
-        return ""
-    if image_path.suffix.lower() == ".svg":
-        return _read_svg_visible_text(image_path)
-    if image_path.suffix.lower() == ".txt":
-        return image_path.read_text(encoding="utf-8", errors="ignore")
-    return ""
 
 
 def _dimension_weights(raw_dimensions: Any) -> dict[str, float]:
@@ -233,33 +222,3 @@ def _weighted_score(scores: dict[str, float], weights: dict[str, float]) -> floa
 
 def _clamp_score(value: float) -> float:
     return round(max(0.0, min(100.0, value)), 6)
-
-
-def _read_svg_visible_text(image_path: Path) -> str:
-    try:
-        root = ET.fromstring(image_path.read_text(encoding="utf-8", errors="ignore"))
-    except ET.ParseError:
-        return ""
-    lines: list[str] = []
-    for element in root.iter():
-        if _svg_local_name(element.tag) != "text":
-            continue
-        text = "".join(element.itertext()).strip()
-        if text:
-            lines.append(html.unescape(text))
-    return "\n".join(lines)
-
-
-def _svg_local_name(tag: str) -> str:
-    if "}" in tag:
-        return tag.rsplit("}", 1)[1]
-    return tag
-
-
-def _contains_visible_text(text: str, value: str) -> bool:
-    value = value.strip()
-    if not value:
-        return False
-    prefix = r"(?<![A-Za-z0-9_])" if value[0].isalnum() or value[0] == "_" else ""
-    suffix = r"(?![A-Za-z0-9_])" if value[-1].isalnum() or value[-1] == "_" else ""
-    return re.search(prefix + re.escape(value) + suffix, text) is not None

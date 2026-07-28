@@ -4,6 +4,14 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+def _safe_int(value: Any) -> int:
+    # A non-integer seed should not abort the whole run; fall back to 0.
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass(frozen=True)
 class BenchmarkConfig:
     benchmark_version: str
@@ -17,7 +25,6 @@ class BenchmarkConfig:
 @dataclass(frozen=True)
 class BenchmarkCase:
     id: str
-    numeric_id: int
     prompt: str
     capability: str
     seed: int
@@ -29,16 +36,14 @@ class BenchmarkCase:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> "BenchmarkCase":
-        raw_id = record.get("id") or record.get("run_id") or record.get("ID")
+        raw_id = record.get("id") or record.get("run_id")
         if raw_id is None:
             raise ValueError("benchmark case is missing id")
-        numeric_id = int(record.get("ID", record.get("numeric_id", 0)) or 0)
         return cls(
             id=str(raw_id),
-            numeric_id=numeric_id,
             prompt=str(record["prompt"]),
             capability=str(record.get("capability", "plan")),
-            seed=int(record.get("seed", 0)),
+            seed=_safe_int(record.get("seed", 0)),
             allowed_tools=[str(value) for value in record.get("allowed_tools", [])],
             expected=dict(record.get("expected", {}) or {}),
             assets=[str(value) for value in record.get("assets", []) or []],
@@ -49,7 +54,6 @@ class BenchmarkCase:
     def to_agent_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "id": self.id,
-            "ID": self.numeric_id,
             "run_id": self.id,
             "prompt": self.prompt,
             "capability": self.capability,
@@ -77,14 +81,12 @@ class Artifact:
 @dataclass(frozen=True)
 class CaseResult:
     id: str
-    numeric_id: int
     prompt: str
     capability: str
     status: str
     score: float
     latency_ms: float
     cost_usd: float
-    checks: list[dict[str, Any]]
     artifacts: list[Artifact]
     dimensions: dict[str, float] | None = None
     judge: dict[str, Any] | None = None

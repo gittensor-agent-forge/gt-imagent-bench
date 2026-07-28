@@ -11,7 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .agent_loader import load_agent, maybe_install_repository, prepare_repository, resolve_commit_sha
+from .agent_loader import load_agent, prepare_repository, resolve_commit_sha
+from .artifacts import persist_agent_result
 from .config import load_config
 from .models import Artifact, BenchmarkResult, CaseResult
 from .policy import evaluate_policy
@@ -54,7 +55,6 @@ def run(
     _append_log(log_path, f"suite={benchmark_config.suite}")
 
     try:
-        maybe_install_repository(candidate_repo, bool(benchmark_config.execution.get("install", False)))
         agent, manifest = load_agent(candidate_repo)
         agent.setup(benchmark_config.agent_config, suite_dir(benchmark_config.suite))
     except Exception as exc:  # noqa: BLE001
@@ -71,19 +71,23 @@ def run(
         _append_log(log_path, f"running case={case.id}")
         case_started = time.perf_counter()
         try:
-            output = agent.generate(case.to_agent_payload(), case_output_dir)
-            image_path = Path(str(output["image_path"])).resolve()
-            trace_path = Path(str(output["trace_path"])).resolve()
-            metadata = output.get("metadata", {})
-            metadata = metadata if isinstance(metadata, dict) else {}
-            checks, score, judge_result = evaluate_case(
+            output = agent.generate(case.to_agent_payload())
+            image_path, trace_path, metadata = persist_agent_result(
+                output, run_id=case.id, case_output_dir=case_output_dir
+            )
+            # The engine times the call. A candidate does not get to report its
+            # own latency.
+            latency_ms = round((time.perf_counter() - case_started) * 1000.0, 3)
+            score, judge_result = evaluate_case(
                 image_path,
                 prompt=case.prompt,
-                checks=_case_checks(case.expected),
                 judge_config=judge_config,
             )
-            status = _case_status(checks=checks, judge_result=judge_result, expected=case.expected)
-            latency_ms = float(metadata.get("latency_ms", (time.perf_counter() - case_started) * 1000.0) or 0.0)
+            status = _case_status(
+                judge_result=judge_result,
+                expected=case.expected,
+                policy_minimum=float(benchmark_config.policy.get("minimum_score", 0.0) or 0.0),
+            )
             cost_usd = float(metadata.get("cost_usd", 0.0) or 0.0) + float(judge_result.get("cost_usd", 0.0) or 0.0)
             artifacts = [
                 artifact_for(image_path, output_path, "image"),
@@ -93,14 +97,12 @@ def run(
             case_results.append(
                 CaseResult(
                     id=case.id,
-                    numeric_id=case.numeric_id,
                     prompt=case.prompt,
                     capability=case.capability,
                     status=status,
                     score=score,
                     latency_ms=latency_ms,
                     cost_usd=cost_usd,
-                    checks=checks,
                     artifacts=artifacts,
                     dimensions=judge_result.get("dimensions") if judge_result else None,
                     judge=judge_result.get("judge") if judge_result else None,
@@ -111,14 +113,12 @@ def run(
             case_results.append(
                 CaseResult(
                     id=case.id,
-                    numeric_id=case.numeric_id,
                     prompt=case.prompt,
                     capability=case.capability,
                     status="error",
                     score=0.0,
                     latency_ms=round((time.perf_counter() - case_started) * 1000.0, 3),
                     cost_usd=0.0,
-                    checks=[],
                     artifacts=[],
                     error=str(exc),
                 )
@@ -174,13 +174,6 @@ def run(
     return result
 
 
-def _case_checks(expected: dict[str, Any]) -> list[dict[str, Any]]:
-    checks = expected.get("checks", [])
-    if not isinstance(checks, list):
-        return []
-    return [check for check in checks if isinstance(check, dict)]
-
-
 def _judge_config(agent_config: dict[str, Any]) -> dict[str, Any]:
     evaluation = agent_config.get("evaluation")
     evaluation = evaluation if isinstance(evaluation, dict) else {}
@@ -188,16 +181,19 @@ def _judge_config(agent_config: dict[str, Any]) -> dict[str, Any]:
     return judge_config if isinstance(judge_config, dict) else {}
 
 
-def _case_status(*, checks: list[dict[str, Any]], judge_result: dict[str, Any], expected: dict[str, Any]) -> str:
-    checks_passed = all(check.get("passed") for check in checks) if checks else True
+def _case_status(*, judge_result: dict[str, Any], expected: dict[str, Any], policy_minimum: float) -> str:
+    # No judge means smoke mode: producing a valid image is the whole bar, and
+    # persist_agent_result already rejected anything unusable.
     if not judge_result:
-        return "pass" if checks_passed else "fail"
+        return "pass"
 
+    # A judged case without its own floor falls back to the policy minimum.
+    # Defaulting to "pass" here would let a case score 3/100 and still count as
+    # a success, which is how the old official suite reported 5/5 passes.
     minimum_score = _case_minimum_score(expected)
     if minimum_score is None:
-        return "pass" if checks_passed else "fail"
-    score_passed = float(judge_result.get("overall_score", 0.0) or 0.0) >= minimum_score
-    return "pass" if checks_passed and score_passed else "fail"
+        minimum_score = policy_minimum
+    return "pass" if float(judge_result.get("overall_score", 0.0) or 0.0) >= minimum_score else "fail"
 
 
 def _case_minimum_score(expected: dict[str, Any]) -> float | None:
@@ -251,7 +247,9 @@ def _ranking(
         }
 
     delta = round(candidate_score - baseline_score, 6)
-    label = "score-regression"
+    # Only a negative delta is a regression. A positive or zero delta that is too
+    # small to clear the smallest improvement threshold is a non-regression.
+    label = "score-regression" if delta < 0 else "no-significant-change"
     for name, threshold in sorted(thresholds.items(), key=lambda item: item[1]):
         if delta >= threshold:
             label = f"improvement-{name}"
@@ -296,7 +294,10 @@ def _percentile(values: list[float], percentile: int) -> float:
     if len(values) == 1:
         return round(values[0], 3)
     ordered = sorted(values)
-    return round(float(statistics.quantiles(ordered, n=100, method="inclusive")[percentile - 1]), 3)
+    quantiles = statistics.quantiles(ordered, n=100, method="inclusive")
+    # quantiles has 99 cut points (indices 0..98); clamp so p<=0 and p=100 stay in range.
+    index = min(max(percentile - 1, 0), len(quantiles) - 1)
+    return round(float(quantiles[index]), 3)
 
 
 def _utc_now() -> str:
@@ -305,7 +306,8 @@ def _utc_now() -> str:
 
 def _append_log(path: Path, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.open("a", encoding="utf-8").write(json.dumps({"ts": _utc_now(), "message": message}) + "\n")
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": _utc_now(), "message": message}) + "\n")
 
 
 def _validate_local_repository_commit(repository: str | Path, requested_commit: str | None, actual_commit: str) -> None:
@@ -359,6 +361,7 @@ def _normalize_repository_identifier(value: str) -> str:
     text = str(value).strip()
     if not text:
         return ""
+    text = _strip_url_credentials(text)
     for pattern in (
         r"^https?://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
         r"^ssh://git@github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
@@ -369,6 +372,21 @@ def _normalize_repository_identifier(value: str) -> str:
         if match:
             return f"{match.group('owner')}/{match.group('repo')}"
     return text.removesuffix(".git")
+
+
+def _strip_url_credentials(text: str) -> str:
+    # Remove embedded userinfo (e.g. tokens or user:pass) from a URL authority so
+    # credentials never leak into the normalized identifier or the report. Only
+    # scheme-based URLs carry userinfo before an "@" in the authority; the SCP
+    # form (git@github.com:owner/repo.git) has no "//" and is left untouched.
+    match = re.match(r"^(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<rest>.*)$", text)
+    if not match:
+        return text
+    rest = match.group("rest")
+    authority, sep, tail = rest.partition("/")
+    if "@" in authority:
+        authority = authority.rsplit("@", 1)[1]
+    return f"{match.group('scheme')}{authority}{sep}{tail}"
 
 
 def _github_report_metadata() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:

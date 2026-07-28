@@ -72,9 +72,9 @@ def load_config(path: str | Path | None = None) -> BenchmarkConfig:
     execution = dict(raw.get("execution", {}) or {})
 
     return BenchmarkConfig(
-        benchmark_version=str(raw.get("benchmark_version", "official-v1")),
-        dataset_version=str(raw.get("dataset_version", "official-v1.0.0")),
-        suite=str(raw.get("suite", "official_v1")),
+        benchmark_version=str(raw.get("benchmark_version", "openrouter-vision-v1")),
+        dataset_version=str(raw.get("dataset_version", "openrouter-vision-v1.0.0")),
+        suite=str(raw.get("suite", "openrouter_vision_v1")),
         agent_config=agent_config,
         policy=policy,
         execution=execution,
