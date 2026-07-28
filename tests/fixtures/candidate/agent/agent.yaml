@@ -1,4 +1,0 @@
-id: fixture-agent
-name: Fixture Agent
-version: 0.1.0
-entrypoint: agent.agent:FixtureAgent

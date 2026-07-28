@@ -1,3 +1,0 @@
-recursive-include src/imagent_bench/suites *.json *.jsonl
-include configs/*.json
-include schemas/*.json

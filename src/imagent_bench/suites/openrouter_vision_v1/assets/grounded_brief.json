@@ -1,9 +1,0 @@
-{
-  "title": "Signal Review Board",
-  "layout": "three_panel",
-  "sections": ["Plan", "Ground", "Verify"],
-  "required_text": ["Signal Review Board", "Plan", "Ground", "Verify"],
-  "visual_constraints": {
-    "density": "compact"
-  }
-}

@@ -1,35 +1,47 @@
+# The benchmark.
+#
+# Two packages, one question between them: given an image and a problem, how
+# good is it?
+#
+#   imagent_bench    generates problems and the answer keys that grade them.
+#                    Stdlib-only, because it is pinned inside an attested TEE
+#                    image and must produce identical problems there and here.
+#   imagent_scoring  grades an image against an answer key, and judges two
+#                    images head to head.
+#
+# Nothing here knows what a crown is. The competition lives in gt-imagent.
+
 [build-system]
 requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "imagent-bench"
-version = "0.1.0"
-description = "Official benchmark runner and report generator for imagent agents."
+version = "0.2.0"
+description = "Problem generation and objective scoring for the Imagent benchmark."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
-# The runner is deliberately stdlib-only so a challenge run has no third-party
-# supply chain between the candidate agent and the recorded score.
+# The core is deliberately dependency-free: the rules a miner is judged by should
+# be readable and re-derivable without installing anything.
 dependencies = []
 
 [project.optional-dependencies]
+# The image backends. This is the one place third-party code is allowed, and it
+# is the validator's own infrastructure — a candidate never executes it.
+scoring = [
+  "pillow>=10.0.0",
+]
 dev = [
   "pytest>=8.0.0",
+  "pillow>=10.0.0",
 ]
-
-[project.scripts]
-imagent-bench = "imagent_bench.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-imagent_bench = ["suites/**/*.jsonl", "suites/**/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
