@@ -282,3 +282,83 @@ class OpenRouterPairwiseJudge:
         # Anything else is a tie. An unparseable verdict must never hand over a
         # crown.
         return "tie"
+
+
+class OpenRouterObjectVerifier:
+    """Counts, colours, and positions, asked of a vision model.
+
+    Stands in for an object detector where no GPU is available. It is the same
+    approach T2I-CompBench uses for attribute binding, but it is strictly weaker
+    than a detector: the answers are not reproducible, so `object_check` marks
+    every result non-deterministic. Swap in a real detector when you can.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: OpenRouterClient | None = None,
+        model: str = DEFAULT_VQA_MODEL,
+        temperature: float = DEFAULT_VQA_TEMPERATURE,
+    ) -> None:
+        self.client = client or OpenRouterClient(title="imagent verifier")
+        self.model = model
+        self.temperature = temperature
+        self._data_urls: dict[str, str] = {}
+
+    def _ask(self, path: Path, question: str, *, max_tokens: int = 8) -> str:
+        key = str(path)
+        if key not in self._data_urls:
+            self._data_urls[key] = image_data_url(path)
+        response = self.client.complete(
+            {
+                "model": self.model,
+                "temperature": self.temperature,
+                "max_tokens": max_tokens,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": question},
+                            {"type": "image_url", "image_url": {"url": self._data_urls[key]}},
+                        ],
+                    }
+                ],
+            }
+        )
+        return message_text(response)
+
+    def count(self, path: Path, name: str) -> int:
+        answer = self._ask(
+            path,
+            f"How many {name} are clearly visible in this image? "
+            "Reply with a single digit and nothing else. Reply 0 if none.",
+        )
+        digits = re.search(r"\d+", answer)
+        # An unparseable answer means "we could not establish it", which scores
+        # the same as absent. It must never be read as a pass.
+        return int(digits.group()) if digits else 0
+
+    def colour(self, path: Path, name: str) -> str:
+        answer = self._ask(
+            path,
+            f"What is the single dominant colour of the {name} in this image? "
+            "Reply with one common colour word and nothing else. "
+            f"Reply 'none' if there is no {name}.",
+            max_tokens=6,
+        )
+        word = re.sub(r"[^a-z]", "", answer.strip().casefold())
+        return "" if word in ("", "none", "unknown") else word
+
+    def relation(self, path: Path, subject: str, relation: str, obj: str) -> bool:
+        phrase = {
+            "left_of": "to the left of",
+            "right_of": "to the right of",
+            "above": "above",
+            "below": "below",
+        }.get(relation, relation)
+        answer = self._ask(
+            path,
+            f"In this image, is the {subject} positioned {phrase} the {obj}? "
+            "Reply with exactly one word: yes or no.",
+        )
+        return answer.strip().casefold().startswith("y")

@@ -42,3 +42,24 @@ class ObjectDetector(Protocol):
 class VqaEngine(Protocol):
     def answer(self, path: Path, question: str) -> str:
         """Answer a yes/no question about the image. Returns 'yes' or 'no'."""
+
+
+@runtime_checkable
+class ObjectVerifier(Protocol):
+    """Answers object questions directly, for deployments with no local detector.
+
+    A detector is strictly better — it is deterministic and its answer can be
+    re-derived by anyone. This exists because a detector needs a GPU, and a
+    competition that cannot grade at all is worse than one that grades with a
+    vision model. Results from this path are marked non-deterministic in the
+    report so nobody mistakes one for the other.
+    """
+
+    def count(self, path: Path, name: str) -> int:
+        """How many of `name` are visible."""
+
+    def colour(self, path: Path, name: str) -> str:
+        """The dominant colour of `name`, or "" if it is not present."""
+
+    def relation(self, path: Path, subject: str, relation: str, obj: str) -> bool:
+        """Whether `subject` is positioned `relation` `obj`."""

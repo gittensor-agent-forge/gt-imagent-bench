@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .backends import ImageLoader, ObjectDetector, OcrEngine, VqaEngine
+from .backends import ImageLoader, ObjectDetector, ObjectVerifier, OcrEngine, VqaEngine
 from .checklist import check_questions
 from .models import AnswerKey, CheckResult, FactReport
-from .object_check import check_objects, check_relations
+from .object_check import check_objects, check_relations, verify_objects, verify_relations
 from .text_check import check_text
 
 
@@ -26,6 +26,7 @@ def score_facts(
     loader: ImageLoader | None = None,
     ocr: OcrEngine | None = None,
     detector: ObjectDetector | None = None,
+    verifier: ObjectVerifier | None = None,
     vqa: VqaEngine | None = None,
 ) -> FactReport:
     """Grade one image against one answer key.
@@ -45,26 +46,34 @@ def score_facts(
         checks.extend(check_text(key.text, ocr.read(image_path)))
 
     if key.objects or key.relations:
-        if detector is None:
+        if detector is not None:
+            # Preferred: a detector's answer is deterministic and anyone holding
+            # the image can re-derive it.
+            detections = detector.detect(image_path)
+            if key.objects:
+                checks.extend(check_objects(key.objects, detections))
+            if key.relations:
+                if loader is None:
+                    raise MissingBackendError(
+                        f"answer key {key.problem_id!r} declares relations but no image loader was supplied"
+                    )
+                width, height = loader.size(image_path)
+                checks.extend(
+                    check_relations(
+                        key.relations, detections, image_width=width, image_height=height
+                    )
+                )
+        elif verifier is not None:
+            # Fallback: a vision model answers the same questions. Every result
+            # is flagged non-deterministic so a report never conflates the two.
+            if key.objects:
+                checks.extend(verify_objects(key.objects, image_path, verifier=verifier))
+            if key.relations:
+                checks.extend(verify_relations(key.relations, image_path, verifier=verifier))
+        else:
             raise MissingBackendError(
-                f"answer key {key.problem_id!r} declares object requirements but no detector was supplied"
-            )
-        # One detection pass feeds both the object checks and the relation checks.
-        detections = detector.detect(image_path)
-
-        if key.objects:
-            checks.extend(check_objects(key.objects, detections))
-
-        if key.relations:
-            if loader is None:
-                raise MissingBackendError(
-                    f"answer key {key.problem_id!r} declares relations but no image loader was supplied"
-                )
-            width, height = loader.size(image_path)
-            checks.extend(
-                check_relations(
-                    key.relations, detections, image_width=width, image_height=height
-                )
+                f"answer key {key.problem_id!r} declares object requirements but neither a "
+                "detector nor an object verifier was supplied"
             )
 
     if key.questions:

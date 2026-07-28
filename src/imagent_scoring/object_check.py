@@ -180,3 +180,97 @@ def _relation_holds(
     if relation == "below":
         return subject_y > object_y + vertical_margin
     raise ValueError(f"unknown relation: {relation}")
+
+
+# --- the no-detector path ----------------------------------------------------
+#
+# Same checks, same scoring, asked of a vision model instead of read off boxes.
+# Every result is flagged non-deterministic, because it is: a detector's answer
+# can be reproduced by anyone holding the image, and this one cannot.
+
+
+def verify_objects(requirements, path, *, verifier) -> list[CheckResult]:
+    results: list[CheckResult] = []
+
+    for requirement in requirements:
+        try:
+            found = max(0, int(verifier.count(path, requirement.name)))
+        except Exception as error:  # noqa: BLE001 - a failed check is a failed check
+            results.append(
+                CheckResult(
+                    kind="object",
+                    label=f"object: {requirement.name}",
+                    passed=False,
+                    score=0.0,
+                    weight=requirement.weight,
+                    detail=f"verifier error: {error}"[:200],
+                )
+            )
+            continue
+
+        if requirement.count is None:
+            passed = found >= 1
+            score = 1.0 if passed else 0.0
+            label = f"object: {requirement.name}"
+        else:
+            passed = found == requirement.count
+            miscount = abs(found - requirement.count)
+            score = 1.0 if passed else max(0.0, 1.0 - miscount / max(1, requirement.count))
+            label = f"object: {requirement.count}x {requirement.name}"
+
+        results.append(
+            CheckResult(
+                kind="object",
+                label=label,
+                passed=passed,
+                score=score,
+                weight=requirement.weight,
+                detail=f"counted {found} (non-deterministic: vision model)",
+            )
+        )
+
+        if requirement.color is None:
+            continue
+
+        try:
+            seen = str(verifier.colour(path, requirement.name)).strip().casefold()
+        except Exception as error:  # noqa: BLE001
+            seen = ""
+        wanted = requirement.color.strip().casefold()
+        colour_passed = bool(seen) and seen == wanted
+        results.append(
+            CheckResult(
+                kind="object",
+                label=f"colour: {requirement.name} is {requirement.color}",
+                passed=colour_passed,
+                score=1.0 if colour_passed else 0.0,
+                weight=requirement.weight,
+                detail=f"saw {seen or 'nothing'} (non-deterministic: vision model)",
+            )
+        )
+
+    return results
+
+
+def verify_relations(requirements, path, *, verifier) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    for requirement in requirements:
+        label = f"relation: {requirement.subject} {requirement.relation} {requirement.object}"
+        try:
+            holds = bool(
+                verifier.relation(path, requirement.subject, requirement.relation, requirement.object)
+            )
+            detail = "satisfied" if holds else "not satisfied"
+        except Exception as error:  # noqa: BLE001
+            holds, detail = False, f"verifier error: {error}"[:200]
+        results.append(
+            CheckResult(
+                kind="relation",
+                label=label,
+                passed=holds,
+                score=1.0 if holds else 0.0,
+                weight=requirement.weight,
+                detail=f"{detail} (non-deterministic: vision model)",
+            )
+        )
+    return results
