@@ -11,6 +11,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .models import TextSpan
+
 # Vision backends served through OpenRouter: the checklist answerer (S2b) and the
 # blind pairwise judge (S4).
 #
@@ -362,3 +364,56 @@ class OpenRouterObjectVerifier:
             "Reply with exactly one word: yes or no.",
         )
         return answer.strip().casefold().startswith("y")
+
+
+class OpenRouterOcr:
+    """Reads text with a vision model, when no OCR engine is installed.
+
+    Strictly worse than real OCR and deliberately opt-in. Reading exact glyphs is
+    what a vision model is least reliable at — it tends to report the word it
+    expected rather than the one that was rendered, which is precisely the error
+    a text-rendering benchmark exists to catch.
+
+    Use it to smoke-test a deployment. Do not decide a crown with it.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: OpenRouterClient | None = None,
+        model: str = DEFAULT_VQA_MODEL,
+    ) -> None:
+        self.client = client or OpenRouterClient(title="imagent ocr")
+        self.model = model
+
+    def read(self, path: Path) -> list[TextSpan]:
+        response = self.client.complete(
+            {
+                "model": self.model,
+                "temperature": 0.0,
+                "max_tokens": 200,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Transcribe every piece of text visible in this image, "
+                                    "exactly as rendered, including misspellings. Do not "
+                                    "correct anything. Reply with the text only, or an empty "
+                                    "reply if there is none."
+                                ),
+                            },
+                            {"type": "image_url", "image_url": {"url": image_data_url(path)}},
+                        ],
+                    }
+                ],
+            }
+        )
+        try:
+            return [TextSpan(text=message_text(response))]
+        except OpenRouterError:
+            # No text found is a legitimate answer, and it must score as "the
+            # required string is absent" rather than blowing up the run.
+            return []
